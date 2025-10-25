@@ -51,7 +51,6 @@ def main():
             "loss_queue_length": LOSS_QUEUE_LEN,
             "num_attention_heads": NUM_ATTN_HEADS,
             "intermediate_dim": INTERMEDIATE_DIM,
-            "activation": "silu",
             "seq_len": SEQ_LEN,
         },
     )
