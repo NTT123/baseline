@@ -141,7 +141,7 @@ class GPT(Module):
         self.embed = Embedding(config.vocab_size, config.hidden_dim)
         self.layers = ModuleList(Block(config) for _ in range(config.num_layers))
         self.unembed_norm = RMSNorm(config)
-        self.unembed = Linear(config.hidden_dim, config.vocab_size, bias=False)
+        self.unembed_proj = Linear(config.hidden_dim, config.vocab_size, bias=False)
         rope_params = compute_rope_params(config)
         self.register_buffer("rope_params", rope_params, persistent=False)
 
@@ -154,7 +154,7 @@ class GPT(Module):
         for block in self.layers:
             x = block(x, rope=rope)
         x = self.unembed_norm(x)
-        logits = self.unembed(x)
+        logits = self.unembed_proj(x)
         return logits
 
     def num_parameters(self):
@@ -162,7 +162,7 @@ class GPT(Module):
         total = (
             sum([t.numel() for t in self.parameters()])
             - self.embed.weight.numel()
-            - self.unembed.weight.numel()
+            - self.unembed_proj.weight.numel()
         )
         return total
 
