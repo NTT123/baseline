@@ -71,7 +71,7 @@ def main():
 
     losses = deque(maxlen=LOSS_QUEUE_LEN)
 
-    for step in range(MAX_TRAINING_STEPS):
+    for step in range(MAX_TRAINING_STEPS + 1):
         lr = get_lr(step)
         optimizer.set_lr(lr)
         optimizer.zero_grad()
