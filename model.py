@@ -28,15 +28,10 @@ class ModelConfig:
         return self.hidden_dim // self.num_attention_heads
 
 
-class RMSNorm(Module):
+def rms_norm(x, eps=1e-18):
     """Normalizing by RMS norm"""
-
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.eps = config.rms_norm_eps
-
-    def forward(self, x: Tensor) -> Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+    rnorm = (x.square().mean(-1, keepdim=True) + eps).rsqrt()
+    return x * rnorm
 
 
 def rotate_half(x):
@@ -107,14 +102,13 @@ class Block(Module):
 
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.attn_norm = RMSNorm(config)
         self.attn_layer = SelfAttention(config)
-        self.mlp_norm = RMSNorm(config)
         self.mlp_layer = MLP(config)
+        self.rms_norm_eps = config.rms_norm_eps
 
     def forward(self, x: Tensor, rope: Callable) -> Tensor:
-        x = x + self.attn_layer(self.attn_norm(x), rope=rope)
-        x = x + self.mlp_layer(self.mlp_norm(x))
+        x = x + self.attn_layer(rms_norm(x, eps=self.rms_norm_eps), rope=rope)
+        x = x + self.mlp_layer(rms_norm(x, eps=self.rms_norm_eps))
         return x
 
 
@@ -140,7 +134,7 @@ class GPT(Module):
         self.config = config
         self.embed = Embedding(config.vocab_size, config.hidden_dim)
         self.layers = ModuleList(Block(config) for _ in range(config.num_layers))
-        self.unembed_norm = RMSNorm(config)
+        self.rms_norm_eps = config.rms_norm_eps
         self.unembed_proj = Linear(config.hidden_dim, config.vocab_size, bias=False)
         rope_params = compute_rope_params(config)
         self.register_buffer("rope_params", rope_params, persistent=False)
@@ -153,7 +147,7 @@ class GPT(Module):
         rope = partial(apply_rotary_pos_emb, rotations=rotations)
         for block in self.layers:
             x = block(x, rope=rope)
-        x = self.unembed_norm(x)
+        x = rms_norm(x, eps=self.rms_norm_eps)
         logits = self.unembed_proj(x)
         return logits
 

@@ -8,11 +8,10 @@ from random import Random
 import numpy as np
 import torch
 from torch.nn.functional import cross_entropy
-from torch.nn.utils import clip_grad_norm_
-from torch.optim import AdamW, Muon
+from torch.optim import SGD, Muon
 
 import wandb
-from model import GPT, ModelConfig
+from model import GPT, ModelConfig, rms_norm
 
 torch.set_num_threads(1)
 torch.manual_seed(0)
@@ -21,8 +20,7 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
 random.seed(0)
 np.random.seed(0)
 BATCH_SIZE = 512 + 256 + 128
-MAX_GRAD_NORM = 1.0
-LR = 8e-4
+LR = 512e-5
 MOMENTUM = 0.95
 EPS = 1e-8
 WEIGHT_DECAY = 0
@@ -42,7 +40,6 @@ def main():
         name="muon-run",
         config={
             "batch_size": BATCH_SIZE,
-            "max_grad_norm": MAX_GRAD_NORM,
             "learning_rate": LR,
             "eps": EPS,
             "momentum": MOMENTUM,
@@ -88,7 +85,7 @@ def main():
             loss = loss_fn(net, x, y)
 
         loss.backward()
-        grad_norm = clip_grad_norm_(net.parameters(), MAX_GRAD_NORM)
+        grad_norm = compute_grad_norm(net.parameters())
 
         optimizer.step()
         losses.append(loss.data)
@@ -155,38 +152,72 @@ def get_lr(it):
     return LR
 
 
+@torch.no_grad()
+def compute_grad_norm(params):
+    return sum(p.grad.square().sum() for p in params).sqrt()
+
+
+class EmbedOptimizer(SGD):
+    """Normalizing embedding grad by its RMS norm"""
+
+    def __init__(self, params, lr=1e-3, momentum=0.95):
+        super().__init__(params, lr=lr, momentum=momentum)
+
+    def step(self):
+        """Perform a single optimization step."""
+        for group in self.param_groups:
+            params = []
+            grads = []
+            momentum_buffer_list = []
+            momentum = group["momentum"]
+            dampening = group["dampening"]
+            lr = group["lr"]
+            self._init_group(group, params, grads, momentum_buffer_list)
+            for i, param in enumerate(params):
+                buf = momentum_buffer_list[i]
+                grad = grads[i]
+                if buf is None:
+                    buf = grad.detach().clone()
+                    momentum_buffer_list[i] = buf
+                else:
+                    buf.mul_(momentum).add_(grad, alpha=1 - dampening)
+                update = rms_norm(buf)
+                param.data.add_(update, alpha=-lr)
+            if group["momentum"] != 0:
+                # update momentum_buffers in state
+                for p, momentum_buffer in zip(params, momentum_buffer_list):
+                    state = self.state[p]
+                    state["momentum_buffer"] = momentum_buffer
+
+
 class Optimizer:
     def __init__(self, model, lr, weight_decay):
         super().__init__()
         matrix_params = []
-        non_matrix_params = []
         for name, p in model.named_parameters():
             if name.endswith("_proj.weight"):
                 matrix_params.append(p)
-            else:
-                non_matrix_params.append(p)
         self.muon = Muon(
             matrix_params,
             lr=lr,
             weight_decay=weight_decay,
-            adjust_lr_fn="match_rms_adamw",
+            adjust_lr_fn="original",
         )
-        self.adam = AdamW(
-            non_matrix_params,
+        self.embed_optimizer = EmbedOptimizer(
+            model.embed.parameters(),
             lr=lr,
-            weight_decay=weight_decay,
         )
 
     def zero_grad(self, set_to_none=False):
-        self.adam.zero_grad(set_to_none=set_to_none)
+        self.embed_optimizer.zero_grad(set_to_none=set_to_none)
         self.muon.zero_grad(set_to_none=set_to_none)
 
     def step(self):
-        self.adam.step()
+        self.embed_optimizer.step()
         self.muon.step()
 
     def set_lr(self, lr):
-        for param_group in self.adam.param_groups:
+        for param_group in self.embed_optimizer.param_groups:
             param_group["lr"] = lr
         for param_group in self.muon.param_groups:
             param_group["lr"] = lr
