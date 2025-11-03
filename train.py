@@ -23,7 +23,7 @@ BATCH_SIZE = 512 + 256 + 128
 LR = 512e-5
 MOMENTUM = 0.95
 EPS = 1e-8
-WEIGHT_DECAY = 0
+WEIGHT_DECAY = 1e-2
 WARMUP = 100
 LOSS_QUEUE_LEN = 200
 NUM_ATTN_HEADS = 16
@@ -61,7 +61,7 @@ def main():
         torch.manual_seed(42)
         net = GPT(config=model_config).to(device=DEVICE)
         net = torch.compile(net, dynamic=False, fullgraph=True)
-        optimizer = Optimizer(net, lr=LR, weight_decay=WEIGHT_DECAY)
+        optimizer = Optimizer(net, lr=LR, momentum=MOMENTUM, weight_decay=WEIGHT_DECAY)
 
     print(net)
     print(f"Total parameters: {net.num_parameters():.3E}")
@@ -160,8 +160,9 @@ def compute_grad_norm(params):
 class EmbedOptimizer(SGD):
     """Normalizing embedding grad by its RMS norm"""
 
-    def __init__(self, params, lr=1e-3, momentum=0.95):
-        super().__init__(params, lr=lr, momentum=momentum)
+    def __init__(self, params, lr=1e-3, momentum=0.95, weight_decay=0.0):
+        assert momentum > 0
+        super().__init__(params, lr=lr, momentum=momentum, weight_decay=weight_decay)
 
     def step(self):
         """Perform a single optimization step."""
@@ -170,12 +171,17 @@ class EmbedOptimizer(SGD):
             grads = []
             momentum_buffer_list = []
             momentum = group["momentum"]
+            weight_decay = group["weight_decay"]
             dampening = group["dampening"]
             lr = group["lr"]
             self._init_group(group, params, grads, momentum_buffer_list)
             for i, param in enumerate(params):
                 buf = momentum_buffer_list[i]
                 grad = grads[i]
+
+                if weight_decay != 0:
+                    grad = grad.add(param, alpha=weight_decay)
+
                 if buf is None:
                     buf = grad.detach().clone()
                     momentum_buffer_list[i] = buf
@@ -191,7 +197,7 @@ class EmbedOptimizer(SGD):
 
 
 class Optimizer:
-    def __init__(self, model, lr, weight_decay):
+    def __init__(self, model, lr, momentum, weight_decay):
         super().__init__()
         matrix_params = []
         for name, p in model.named_parameters():
@@ -200,12 +206,14 @@ class Optimizer:
         self.muon = Muon(
             matrix_params,
             lr=lr,
+            momentum=momentum,
             weight_decay=weight_decay,
             adjust_lr_fn="original",
         )
         self.embed_optimizer = EmbedOptimizer(
             model.embed.parameters(),
             lr=lr,
+            momentum=momentum,
         )
 
     def zero_grad(self, set_to_none=False):
